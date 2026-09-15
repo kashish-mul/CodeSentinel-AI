@@ -52,6 +52,7 @@ jobs:
           context: .
           file: ./Dockerfile
           push: false
+          load: true
           tags: codesentinel-ai:latest
 
       - name: Cloud Release Deployment Step

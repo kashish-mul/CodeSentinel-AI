@@ -1,6 +1,6 @@
 # Multi-stage Production Dockerfile for CodeSentinel AI
 # Stage 1: Build stage
-FROM node:22-alpine AS builder
+FROM node:22-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -17,7 +17,7 @@ COPY . .
 RUN npm run build
 
 # Stage 2: Production runtime image
-FROM node:22-alpine AS runner
+FROM node:22-bookworm-slim AS runner
 
 WORKDIR /app
 
@@ -25,11 +25,14 @@ ENV NODE_ENV=production
 ENV PORT=3000
 
 # Copy package manifests and production dependencies
-COPY --from=builder /app/package*.json ./
+COPY package*.json ./
 RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
 
 # Copy compiled build output
 COPY --from=builder /app/dist ./dist
+
+# Create persistent data directory and grant ownership to non-root node user
+RUN mkdir -p /app/data && chown -R node:node /app
 
 # Non-root user for container security
 USER node
