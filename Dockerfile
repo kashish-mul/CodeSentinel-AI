@@ -28,8 +28,9 @@ ENV PORT=3000
 COPY package*.json ./
 RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
 
-# Copy compiled build output
+# Copy compiled build output and persistence store
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/data ./data
 
 # Create persistent data directory and grant ownership to non-root node user
 RUN mkdir -p /app/data && chown -R node:node /app

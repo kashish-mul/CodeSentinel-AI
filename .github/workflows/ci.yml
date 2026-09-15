@@ -43,17 +43,11 @@ jobs:
       - name: Checkout Codebase
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: actions/setup-buildx-action@v3
-
       - name: Build and Package Container Image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: false
-          load: true
-          tags: codesentinel-ai:latest
+        run: |
+          docker build -t codesentinel-ai:latest -f Dockerfile .
+          docker image inspect codesentinel-ai:latest --format 'Built image ID: {{.Id}}'
+          docker images codesentinel-ai:latest
 
       - name: Cloud Release Deployment Step
         run: |
