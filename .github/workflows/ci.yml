@@ -17,10 +17,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'npm'
 
       - name: Install Dependencies
-        run: npm ci
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
       - name: Static Type Check and Linting
         run: npm run lint
@@ -29,12 +33,12 @@ jobs:
         run: npm run build
 
       - name: Run Core Test Suite
-        run: npx tsx -e "import('./src/server/analysis/testRunner.ts').then(m => { const r = m.TestRunner.runAllTests(); console.log('Test Suite Summary:', r); if (r.failed > 0) process.exit(1); })"
+        run: npm test
 
   container-release-and-deploy:
     needs: validate-and-test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     steps:
       - name: Checkout Codebase
         uses: actions/checkout@v4

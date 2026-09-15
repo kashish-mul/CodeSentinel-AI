@@ -9,7 +9,8 @@
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx -e \"import('./src/server/analysis/testRunner.ts').then(m => { const r = m.TestRunner.runAllTests(); console.log('Test Suite Summary:', r); if (r.failed > 0) process.exit(1); })\""
   },
   "dependencies": {
     "@babel/parser": "^8.0.5",
