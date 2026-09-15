@@ -1,6 +1,6 @@
 export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO';
 
-export type Category = 'SECURITY' | 'CODE_QUALITY' | 'MAINTAINABILITY' | 'DOCUMENTATION';
+export type Category = 'SECURITY' | 'CODE_QUALITY' | 'MAINTAINABILITY' | 'DOCUMENTATION' | 'DEPENDENCY';
 
 export interface Finding {
   id: string;
@@ -15,6 +15,14 @@ export interface Finding {
   recommendation: string;
   cwe?: string;
   owaspCategory?: string;
+  astNodeType?: string;
+  analysisMethod?: 'AST' | 'SCA' | 'HEURISTIC';
+  dependencyInfo?: {
+    packageName: string;
+    installedVersion: string;
+    fixedVersion: string;
+    cve: string;
+  };
   aiExplanation?: AIRemediation;
 }
 
@@ -24,6 +32,7 @@ export interface AIRemediation {
   stepByStepFix: string[];
   remediatedCode: string;
   saferAlternativeSnippet: string;
+  diffSnippet?: string;
   modelUsed: string;
   generatedAt: string;
 }
@@ -46,6 +55,7 @@ export interface SeverityCounts {
 
 export interface Scan {
   id: string;
+  userId?: string;
   repositoryName: string;
   sourceType: 'GITHUB' | 'ZIP_UPLOAD' | 'CODE_SNIPPET' | 'SAMPLE_REPO';
   sourceUrl?: string;
@@ -69,6 +79,20 @@ export interface RepositorySummary {
   criticalIssues: number;
 }
 
+export interface SourceFile {
+  path: string;
+  content: string;
+  language: string;
+  size: number;
+}
+
+export interface RepositorySource {
+  name: string;
+  source: 'github' | 'zip' | 'snippet' | 'sample';
+  files: SourceFile[];
+  url?: string;
+}
+
 export interface User {
   id: string;
   name: string;
@@ -88,6 +112,14 @@ export interface BenchmarkItem {
   expectedVulnerabilityType?: string;
 }
 
+export interface BenchmarkCategoryMetrics {
+  category: string;
+  total: number;
+  precision: number;
+  recall: number;
+  f1Score: number;
+}
+
 export interface BenchmarkResult {
   totalSamples: number;
   vulnerableSamples: number;
@@ -100,6 +132,9 @@ export interface BenchmarkResult {
   recall: number;
   f1Score: number;
   accuracy: number;
+  falsePositiveRate: number;
+  falseNegativeRate: number;
+  categoryBreakdowns: BenchmarkCategoryMetrics[];
   detailedResults: {
     id: string;
     name: string;
@@ -110,6 +145,27 @@ export interface BenchmarkResult {
     detectedVulnerabilities: string[];
     snippet: string;
   }[];
+}
+
+export interface CopilotMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+}
+
+export interface RemediationReport {
+  id: string;
+  scanId: string;
+  repositoryName: string;
+  generatedAt: string;
+  executiveSummary: string;
+  overallScore: number;
+  scores: ScanScores;
+  severityCounts: SeverityCounts;
+  totalFindings: number;
+  criticalFindingsCount: number;
+  findings: Finding[];
 }
 
 export interface TestSuiteResult {

@@ -8,8 +8,16 @@ import { ScoringEngine } from './src/server/analysis/scoringEngine';
 import { runBenchmarkEvaluation } from './src/server/analysis/benchmarkData';
 import { AIService } from './src/server/analysis/aiService';
 import { TestRunner } from './src/server/analysis/testRunner';
+import { GitHubScanner } from './src/server/analysis/githubScanner';
+import { GitHubIngestion } from './src/server/ingestion/githubIngestion';
+import { ZipIngestion } from './src/server/ingestion/zipIngestion';
+import { SnippetIngestion } from './src/server/ingestion/snippetIngestion';
+import { DependencyAnalyzer } from './src/server/analysis/dependencyAnalyzer';
 import { SAMPLE_REPOSITORIES } from './src/server/sampleRepos';
-import { Scan, Finding, User } from './src/types';
+import { db } from './src/server/db';
+import { dbClient } from './src/server/db/client';
+import { AuthService, AuthRequest } from './src/server/auth';
+import { Scan, Finding, User, RemediationReport } from './src/types';
 
 dotenv.config();
 
@@ -18,105 +26,145 @@ const PORT = 3000;
 
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+app.use(AuthService.middleware);
 
-// In-Memory Persistence (Repositories, Users, Scans)
-const users: User[] = [
-  {
-    id: 'user-default-1',
-    name: 'Lead Developer',
-    email: 'developer@codesentinel.io',
-    role: 'Security Engineer',
-  }
-];
+// Seed initial scans into the database if empty
+async function seedInitialDatabaseScans() {
+  const existingScans = await db.getScans();
+  if (existingScans.length === 0) {
+    console.log('[DB] Seeding baseline sample repository scans...');
+    for (const sample of SAMPLE_REPOSITORIES) {
+      const scanId = `scan-${sample.id}-${Date.now().toString(36)}`;
+      const findings: Finding[] = [];
+      let totalLines = 0;
 
-const scans: Scan[] = [];
+      for (const file of sample.files) {
+        totalLines += file.content.split('\n').length;
+        findings.push(...SecurityAnalyzer.analyzeFile(file, scanId));
+        findings.push(...QualityAnalyzer.analyzeFile(file, scanId));
+      }
 
-// Helper to seed initial sample scans so user immediately sees rich dashboard metrics
-function seedInitialScans() {
-  for (const sample of SAMPLE_REPOSITORIES) {
-    const scanId = `scan-${sample.id}-${Date.now().toString(36)}`;
-    const findings: Finding[] = [];
-    let totalLines = 0;
+      const { scores, counts } = ScoringEngine.calculateScores(findings, sample.files.length, totalLines);
 
-    for (const file of sample.files) {
-      totalLines += file.content.split('\n').length;
-      findings.push(...SecurityAnalyzer.analyzeFile(file, scanId));
-      findings.push(...QualityAnalyzer.analyzeFile(file, scanId));
+      const scan: Scan = {
+        id: scanId,
+        repositoryName: sample.name,
+        sourceType: 'SAMPLE_REPO',
+        sourceUrl: sample.id,
+        status: 'COMPLETED',
+        scores,
+        severityCounts: counts,
+        totalFilesAnalyzed: sample.files.length,
+        totalLinesOfCode: totalLines,
+        startedAt: new Date(Date.now() - 1000 * 60 * 15).toISOString(),
+        completedAt: new Date().toISOString(),
+        findings,
+      };
+
+      await db.saveScan(scan);
     }
-
-    const { scores, counts } = ScoringEngine.calculateScores(findings, sample.files.length, totalLines);
-
-    scans.push({
-      id: scanId,
-      repositoryName: sample.name,
-      sourceType: 'SAMPLE_REPO',
-      sourceUrl: sample.id,
-      status: 'COMPLETED',
-      scores,
-      severityCounts: counts,
-      totalFilesAnalyzed: sample.files.length,
-      totalLinesOfCode: totalLines,
-      startedAt: new Date(Date.now() - 1000 * 60 * 15).toISOString(),
-      completedAt: new Date().toISOString(),
-      findings,
-    });
   }
 }
 
-seedInitialScans();
-
 // --- REST API ENDPOINTS ---
 
-// 1. Health check
+// 1. Health check & Diagnostics
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'CodeSentinel AI Engine',
-    version: '1.0.0',
+    service: 'CodeSentinel Static Analysis & Security Engine',
+    version: '2.0.0-ast',
     timestamp: new Date().toISOString(),
+    postgresConnected: db.isPostgresConnected(),
     geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
+    astAnalyzers: ['TypeScript/JavaScript Compiler AST', 'Python AST Visitor', 'SCA Dependency Scanner'],
   });
 });
 
-// 2. Authentication
-app.post('/api/auth/login', (req, res) => {
-  const { email, password } = req.body;
-  if (!email) {
-    return res.status(400).json({ error: 'Email is required' });
+// 2. Cryptographic Authentication (JWT + Bcrypt)
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    const existingUser = await db.getUserByEmail(email);
+    if (!existingUser) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    if (existingUser.password_hash) {
+      const isValid = AuthService.verifyPassword(password, existingUser.password_hash);
+      if (!isValid) {
+        return res.status(401).json({ error: 'Invalid email or password' });
+      }
+    }
+
+    const userPayload: User = {
+      id: existingUser.id,
+      email: existingUser.email,
+      name: existingUser.name,
+      role: existingUser.role,
+    };
+
+    const token = AuthService.generateToken(userPayload);
+    return res.json({ user: userPayload, token });
+  } catch (err: any) {
+    console.error('Login error:', err);
+    return res.status(500).json({ error: 'Internal authentication failure' });
   }
-  const user = users.find(u => u.email.toLowerCase() === email.toLowerCase()) || {
-    id: `user-${Date.now()}`,
-    name: email.split('@')[0] || 'Developer',
-    email,
-    role: 'Security Architect',
-  };
-
-  return res.json({
-    user,
-    token: `cs_jwt_${Buffer.from(JSON.stringify(user)).toString('base64')}`,
-  });
 });
 
-app.post('/api/auth/register', (req, res) => {
-  const { name, email } = req.body;
-  if (!email || !name) {
-    return res.status(400).json({ error: 'Name and email are required' });
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    if (!email || !name || !password) {
+      return res.status(400).json({ error: 'Name, email, and password are required' });
+    }
+
+    const existing = await db.getUserByEmail(email);
+    if (existing) {
+      return res.status(409).json({ error: 'A user with this email already exists' });
+    }
+
+    const password_hash = AuthService.hashPassword(password);
+    const newUser = await db.createUser({
+      id: `usr_${Date.now().toString(36)}_${Math.random().toString(36).substr(2, 4)}`,
+      email,
+      name,
+      role: 'Security Engineer',
+      password_hash,
+    });
+
+    const userPayload: User = {
+      id: newUser.id,
+      email: newUser.email,
+      name: newUser.name,
+      role: newUser.role,
+    };
+
+    const token = AuthService.generateToken(userPayload);
+    return res.status(201).json({ user: userPayload, token });
+  } catch (err: any) {
+    console.error('Registration error:', err);
+    return res.status(500).json({ error: 'Registration failed' });
   }
-  const newUser: User = {
-    id: `user-${Date.now()}`,
-    name,
-    email,
-    role: 'Developer',
-  };
-  users.push(newUser);
-  return res.json({
-    user: newUser,
-    token: `cs_jwt_${Buffer.from(JSON.stringify(newUser)).toString('base64')}`,
-  });
 });
 
-app.get('/api/auth/me', (req, res) => {
-  return res.json({ user: users[0] });
+app.get('/api/auth/me', (req: AuthRequest, res) => {
+  if (req.user) {
+    return res.json({ user: req.user });
+  }
+  // Default demo user fallback if no token provided
+  return res.json({
+    user: {
+      id: 'usr_sec_lead_01',
+      name: 'Lead AppSec Engineer',
+      email: 'developer@codesentinel.io',
+      role: 'Principal Security Architect',
+    }
+  });
 });
 
 // 3. Repositories
@@ -129,22 +177,19 @@ app.get('/api/sample-repositories', (req, res) => {
   })));
 });
 
-app.get('/api/repositories', (req, res) => {
-  const repoMap = new Map<string, { name: string; count: number; lastScore: number }>();
-  for (const s of scans) {
-    repoMap.set(s.repositoryName, {
-      name: s.repositoryName,
-      count: (repoMap.get(s.repositoryName)?.count || 0) + 1,
-      lastScore: s.scores.overall,
-    });
+app.get('/api/repositories', async (req, res) => {
+  try {
+    const repos = await db.getRepositories();
+    return res.json(repos);
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to retrieve repositories' });
   }
-  return res.json(Array.from(repoMap.values()));
 });
 
-// 4. Scans & Analysis Ingestion
-app.post('/api/scans/analyze', async (req, res) => {
+// 4. Scans & AST Analysis Ingestion
+app.post('/api/scans/analyze', async (req: AuthRequest, res) => {
   try {
-    const { sourceType, repoName, githubUrl, sampleRepoId, files } = req.body;
+    const { sourceType, repoName, githubUrl, sampleRepoId, files, zipBase64, codeSnippet, fileName } = req.body;
 
     let targetFiles: FileInput[] = [];
     let targetName = repoName || 'custom-analysis';
@@ -157,49 +202,31 @@ app.post('/api/scans/analyze', async (req, res) => {
       targetFiles = sample.files;
       targetName = sample.name;
     } else if (sourceType === 'GITHUB' && githubUrl) {
-      // Fetch public repository file tree or fallback sample
-      targetName = githubUrl.split('/').pop()?.replace('.git', '') || 'github-repo';
+      // Real recursive GitHub repository fetcher using GitHubIngestion
       try {
-        // Try fetching package.json or README.md from raw GitHub
-        const match = githubUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
-        if (match) {
-          const [, owner, repo] = match;
-          const rawBase = `https://raw.githubusercontent.com/${owner}/${repo}/main`;
-          const rawMaster = `https://raw.githubusercontent.com/${owner}/${repo}/master`;
-
-          const fetchFile = async (fileName: string) => {
-            let resp = await fetch(`${rawBase}/${fileName}`);
-            if (!resp.ok) resp = await fetch(`${rawMaster}/${fileName}`);
-            if (resp.ok) {
-              const content = await resp.text();
-              return { path: fileName, content };
-            }
-            return null;
-          };
-
-          const filesToCheck = ['README.md', 'package.json', 'server.js', 'app.py', 'index.js', 'main.py'];
-          for (const f of filesToCheck) {
-            const fetched = await fetchFile(f);
-            if (fetched) targetFiles.push(fetched);
-          }
-        }
-      } catch (err) {
-        console.warn('Could not fetch external github files directly:', err);
+        console.log(`[GitHubIngestion] Fetching recursive tree for: ${githubUrl}`);
+        const repoSource = await GitHubIngestion.ingest(githubUrl);
+        targetFiles = repoSource.files.map(f => ({ path: f.path, content: f.content }));
+        targetName = repoSource.name;
+        console.log(`[GitHubIngestion] Successfully retrieved ${targetFiles.length} source files for ${targetName}`);
+      } catch (err: any) {
+        return res.status(422).json({
+          error: `GitHub repository analysis failed: ${err.message}`
+        });
       }
-
-      // If no files could be fetched directly (e.g. rate limit / private), provide mock repo structure with warning
-      if (targetFiles.length === 0) {
-        targetFiles = [
-          {
-            path: 'src/api/auth.py',
-            content: `import os\n\ndef authenticate_user(username, password):\n    # Potential SQL injection in raw query\n    sql = "SELECT * FROM users WHERE username = '" + username + "'"\n    db.execute(sql)\n`,
-          },
-          {
-            path: 'README.md',
-            content: `# ${targetName}\nProject scanned via CodeSentinel AI static analyzer.\n`,
-          }
-        ];
+    } else if (sourceType === 'ZIP' && zipBase64) {
+      // Decompress and process ZIP archive securely
+      try {
+        const repoSource = await ZipIngestion.ingestFromBase64(zipBase64, targetName);
+        targetFiles = repoSource.files.map(f => ({ path: f.path, content: f.content }));
+        targetName = repoSource.name;
+      } catch (err: any) {
+        return res.status(400).json({ error: `ZIP archive ingestion failed: ${err.message}` });
       }
+    } else if (codeSnippet) {
+      const repoSource = SnippetIngestion.ingest(codeSnippet, fileName || 'snippet.ts', targetName);
+      targetFiles = repoSource.files.map(f => ({ path: f.path, content: f.content }));
+      targetName = repoSource.name;
     } else if (Array.isArray(files) && files.length > 0) {
       // Validate paths against path traversal
       for (const f of files) {
@@ -226,6 +253,7 @@ app.post('/api/scans/analyze', async (req, res) => {
 
     const scan: Scan = {
       id: scanId,
+      userId: req.user?.id,
       repositoryName: targetName,
       sourceType: sourceType || 'CODE_SNIPPET',
       sourceUrl: githubUrl || undefined,
@@ -239,7 +267,7 @@ app.post('/api/scans/analyze', async (req, res) => {
       findings,
     };
 
-    scans.unshift(scan);
+    await db.saveScan(scan);
     return res.status(201).json(scan);
   } catch (error: any) {
     console.error('Scan failed:', error);
@@ -247,27 +275,40 @@ app.post('/api/scans/analyze', async (req, res) => {
   }
 });
 
-app.get('/api/scans', (req, res) => {
-  return res.json(scans);
-});
-
-app.get('/api/scans/:id', (req, res) => {
-  const scan = scans.find(s => s.id === req.params.id);
-  if (!scan) {
-    return res.status(404).json({ error: 'Scan not found' });
+app.get('/api/scans', async (req, res) => {
+  try {
+    const allScans = await db.getScans();
+    return res.json(allScans);
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to retrieve scans' });
   }
-  return res.json(scan);
 });
 
-app.get('/api/scans/:id/findings', (req, res) => {
-  const scan = scans.find(s => s.id === req.params.id);
-  if (!scan) {
-    return res.status(404).json({ error: 'Scan not found' });
+app.get('/api/scans/:id', async (req, res) => {
+  try {
+    const scan = await db.getScanById(req.params.id);
+    if (!scan) {
+      return res.status(404).json({ error: 'Scan not found' });
+    }
+    return res.json(scan);
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to retrieve scan' });
   }
-  return res.json(scan.findings);
 });
 
-// 5. AI Remediation
+app.get('/api/scans/:id/findings', async (req, res) => {
+  try {
+    const scan = await db.getScanById(req.params.id);
+    if (!scan) {
+      return res.status(404).json({ error: 'Scan not found' });
+    }
+    return res.json(scan.findings);
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to retrieve scan findings' });
+  }
+});
+
+// 5. AI-Assisted Remediation & Diff Synthesis
 app.post('/api/ai/explain', async (req, res) => {
   try {
     const { finding } = req.body;
@@ -283,7 +324,55 @@ app.post('/api/ai/explain', async (req, res) => {
   }
 });
 
-// 6. Stage 26 Benchmark Evaluation
+// Interactive Security Copilot Q&A
+app.post('/api/copilot/ask', async (req, res) => {
+  try {
+    const { finding, question, history } = req.body;
+    if (!finding || !question) {
+      return res.status(400).json({ error: 'Finding and question are required' });
+    }
+
+    const answer = await AIService.askCopilot(finding, question, history || []);
+    return res.json({ answer });
+  } catch (err: any) {
+    console.error('Copilot ask error:', err);
+    return res.status(500).json({ error: 'Failed to process Copilot request' });
+  }
+});
+
+// Generate or Retrieve Full Remediation Report
+app.get('/api/scans/:id/report', async (req, res) => {
+  try {
+    const scan = await db.getScanById(req.params.id);
+    if (!scan) {
+      return res.status(404).json({ error: 'Scan not found' });
+    }
+
+    const criticalCount = scan.findings.filter(f => f.severity === 'CRITICAL').length;
+    const highCount = scan.findings.filter(f => f.severity === 'HIGH').length;
+
+    const report: RemediationReport = {
+      id: `report-${scan.id}`,
+      scanId: scan.id,
+      repositoryName: scan.repositoryName,
+      generatedAt: new Date().toISOString(),
+      overallScore: scan.scores.overall,
+      executiveSummary: `CodeSentinel AST analysis evaluated ${scan.totalFilesAnalyzed} source files (${scan.totalLinesOfCode} lines of code) in ${scan.repositoryName}. A total of ${scan.findings.length} findings were identified, including ${criticalCount} critical and ${highCount} high severity risks. Key focus areas include injection mitigation, cryptographic security, and dependency updates.`,
+      scores: scan.scores,
+      severityCounts: scan.severityCounts,
+      totalFindings: scan.findings.length,
+      criticalFindingsCount: criticalCount,
+      findings: scan.findings,
+    };
+
+    return res.json(report);
+  } catch (err: any) {
+    console.error('Report generation error:', err);
+    return res.status(500).json({ error: 'Failed to generate report' });
+  }
+});
+
+// 6. Empirical Benchmark Evaluation
 app.get('/api/evaluation/benchmark', (req, res) => {
   const benchmarkResults = runBenchmarkEvaluation();
   return res.json(benchmarkResults);
@@ -295,8 +384,14 @@ app.get('/api/tests/run', (req, res) => {
   return res.json(testResults);
 });
 
-// Start server with Vite middleware
+// Start server with Vite middleware & DB initialization
 async function startServer() {
+  // Initialize Database and Seed default account
+  await dbClient.initialize();
+  await db.initialize();
+  await AuthService.seedDefaultUser();
+  await seedInitialDatabaseScans();
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },

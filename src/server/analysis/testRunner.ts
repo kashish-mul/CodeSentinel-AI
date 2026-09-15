@@ -3,6 +3,8 @@ import { SecurityAnalyzer } from './securityAnalyzer';
 import { QualityAnalyzer } from './qualityAnalyzer';
 import { ScoringEngine } from './scoringEngine';
 import { runBenchmarkEvaluation } from './benchmarkData';
+import { DependencyScanner } from './dependencyScanner';
+import { AuthService } from '../auth';
 
 export class TestRunner {
   public static runAllTests(): TestSuiteResult {
@@ -19,41 +21,33 @@ export class TestRunner {
       }
     }
 
-    // 1. Security Analyzer Tests
-    record('SecurityAnalyzer: Detects hardcoded AWS keys', 'Security', () => {
+    // 1. AST-Based Static Analysis Tests
+    record('AST Security: TypeScript/JavaScript AST flags CallExpression SQL injection', 'AST Analysis', () => {
       const findings = SecurityAnalyzer.analyzeFile(
-        { path: 'config.py', content: 'AWS_KEY = "AKIA1234567890ABCDEF"' },
-        't1'
+        { path: 'controllers/user.ts', content: 'const res = await db.query("SELECT * FROM users WHERE id = " + req.query.id);' },
+        't-ast-1'
       );
-      if (findings.length === 0 || findings[0].severity !== 'CRITICAL') {
-        throw new Error('Failed to identify critical AWS key');
+      const sqli = findings.find(f => f.title.includes('SQL Injection') && f.astNodeType?.includes('CallExpression'));
+      if (!sqli) {
+        throw new Error('AST failed to identify CallExpression SQL injection in TypeScript');
       }
     });
 
-    record('SecurityAnalyzer: Detects SQL injection concatenation', 'Security', () => {
+    record('AST Security: Python AST flags Call with concatenated query', 'AST Analysis', () => {
       const findings = SecurityAnalyzer.analyzeFile(
-        { path: 'db.js', content: 'const sql = "SELECT * FROM users WHERE id = " + userId;' },
-        't2'
+        { path: 'routes/auth.py', content: 'def query_user(uid):\n    return cursor.execute("SELECT * FROM users WHERE id = " + uid)' },
+        't-ast-2'
       );
-      if (!findings.some(f => f.title.includes('SQL Injection'))) {
-        throw new Error('Failed to identify SQL injection risk');
+      const pySqli = findings.find(f => f.title.includes('SQL Injection') && f.astNodeType?.includes('Call'));
+      if (!pySqli) {
+        throw new Error('Python AST failed to identify cursor.execute concatenation');
       }
     });
 
-    record('SecurityAnalyzer: Detects dangerous eval()', 'Security', () => {
-      const findings = SecurityAnalyzer.analyzeFile(
-        { path: 'calc.js', content: 'const res = eval(input);' },
-        't3'
-      );
-      if (!findings.some(f => f.title.includes('eval()'))) {
-        throw new Error('Failed to identify eval() usage');
-      }
-    });
-
-    record('SecurityAnalyzer: Ignores safe parameterized SQL queries (False Positive Check)', 'Security', () => {
+    record('AST Security: Ignores safe parameterized queries (False Positive Check)', 'AST Analysis', () => {
       const findings = SecurityAnalyzer.analyzeFile(
         { path: 'db.js', content: 'const res = await db.query("SELECT * FROM users WHERE id = $1", [id]);' },
-        't4'
+        't-ast-3'
       );
       const sqli = findings.filter(f => f.title.includes('SQL Injection'));
       if (sqli.length > 0) {
@@ -61,42 +55,87 @@ export class TestRunner {
       }
     });
 
-    // 2. Quality Analyzer Tests
-    record('QualityAnalyzer: Calculates cyclomatic complexity for branch-heavy methods', 'Quality', () => {
-      const complexCode = `function processOrder(order) {
-        if (order.status === 'pending') {
-          if (order.amount > 100) {
-            if (order.user.verified) {
-              return 'approve_vip';
-            } else if (order.user.flagged) {
-              return 'manual_review';
-            }
-          }
-          if (order.payment === 'credit' || order.payment === 'crypto') {
-            for (let i = 0; i < 5; i++) {
-              if (order.items[i]?.stock === 0) return 'backorder';
-            }
-          }
-        }
-        return 'standard';
-      }`;
-      const findings = QualityAnalyzer.analyzeFile({ path: 'order.js', content: complexCode }, 't5');
-      if (!findings.some(f => f.title.includes('Complexity') || f.title.includes('Excessive'))) {
-        // If below strict threshold, ensure branch parsing occurred
+    record('AST Security: Detects dangerous eval() call expression', 'AST Analysis', () => {
+      const findings = SecurityAnalyzer.analyzeFile(
+        { path: 'calc.js', content: 'const res = eval(input);' },
+        't-ast-4'
+      );
+      if (!findings.some(f => f.title.includes('eval()'))) {
+        throw new Error('Failed to identify eval() call');
       }
     });
 
-    record('QualityAnalyzer: Detects empty catch blocks (silent exception suppression)', 'Quality', () => {
+    record('AST Security: Detects DOM XSS via innerHTML assignment', 'AST Analysis', () => {
+      const findings = SecurityAnalyzer.analyzeFile(
+        { path: 'dom.js', content: 'element.innerHTML = untrustedData;' },
+        't-ast-5'
+      );
+      if (!findings.some(f => f.title.includes('Cross-Site Scripting') || f.title.includes('XSS'))) {
+        throw new Error('Failed to identify DOM XSS via innerHTML');
+      }
+    });
+
+    // 2. Software Composition Analysis (SCA)
+    record('SCA Scanner: Identifies vulnerable dependencies with CVE in package.json', 'Dependency SCA', () => {
+      const pkgContent = JSON.stringify({
+        name: 'test-app',
+        dependencies: {
+          'lodash': '4.17.15',
+          'axios': '0.20.0'
+        }
+      }, null, 2);
+      const findings = DependencyScanner.scanFile(
+        { path: 'package.json', content: pkgContent },
+        't-sca-1'
+      );
+      if (findings.length < 2) {
+        throw new Error(`Expected at least 2 CVE findings, got ${findings.length}`);
+      }
+      if (!findings.some(f => f.dependencyInfo?.cve === 'CVE-2021-23337')) {
+        throw new Error('Missing CVE-2021-23337 for lodash');
+      }
+    });
+
+    // 3. Cryptography & Authentication
+    record('AuthService: Password hashing with bcrypt & salt verification', 'Auth & Crypto', () => {
+      const rawPassword = 'SecretUserPassword2026!';
+      const hash = AuthService.hashPassword(rawPassword);
+      if (!hash.startsWith('$2') || hash.length < 50) {
+        throw new Error('Invalid bcrypt hash generated');
+      }
+      if (!AuthService.verifyPassword(rawPassword, hash)) {
+        throw new Error('Bcrypt password verification failed with correct password');
+      }
+      if (AuthService.verifyPassword('WrongPassword', hash)) {
+        throw new Error('Bcrypt accepted invalid password');
+      }
+    });
+
+    record('AuthService: Signs and cryptographically validates JWT token', 'Auth & Crypto', () => {
+      const user = { id: 'u123', email: 'test@sentinel.io', name: 'Security Test', role: 'Analyst' };
+      const token = AuthService.generateToken(user);
+      const verified = AuthService.verifyToken(token);
+      if (!verified || verified.email !== 'test@sentinel.io') {
+        throw new Error('JWT signature verification failed or payload altered');
+      }
+      const invalid = AuthService.verifyToken(token + 'tampered');
+      if (invalid !== null) {
+        throw new Error('JWT accepted tampered signature');
+      }
+    });
+
+    // 4. Code Quality & Complexity
+    record('QualityAnalyzer: Detects empty catch blocks (silent exception suppression)', 'Code Quality', () => {
       const findings = QualityAnalyzer.analyzeFile(
         { path: 'worker.ts', content: 'try { doTask(); } catch (err) {}' },
-        't6'
+        't-qual-1'
       );
       if (!findings.some(f => f.title.includes('Empty Catch Block'))) {
         throw new Error('Failed to flag silent exception suppression');
       }
     });
 
-    // 3. Scoring Engine Tests
+    // 5. Scoring Engine Tests
     record('ScoringEngine: Weights 40% Security, 30% Quality, 20% Maintainability, 10% Documentation', 'Scoring', () => {
       const findings = [
         {
@@ -118,8 +157,8 @@ export class TestRunner {
       if (scores.overall >= 100) throw new Error('Overall score did not reflect penalty');
     });
 
-    // 4. Ingestion Safety & Security Testing (Malicious inputs)
-    record('IngestionGuard: Rejects path traversal and dangerous paths', 'Safety', () => {
+    // 6. Ingestion Guard
+    record('IngestionGuard: Rejects path traversal and dangerous directory structures', 'Safety', () => {
       const dangerousPaths = ['../../etc/passwd', '..\\..\\windows\\system32', '/root/.ssh/id_rsa'];
       for (const p of dangerousPaths) {
         const isSafe = !p.includes('..') && !p.startsWith('/') && !p.includes('\\');
@@ -127,18 +166,10 @@ export class TestRunner {
       }
     });
 
-    record('IngestionGuard: Protects against oversized file input (ZIP bomb protection)', 'Safety', () => {
-      const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
-      const fakeLargeSize = 25 * 1024 * 1024;
-      if (fakeLargeSize <= MAX_FILE_SIZE_BYTES) {
-        throw new Error('Failed to enforce size boundary on oversized file');
-      }
-    });
-
-    // 5. Benchmark Suite Integration
+    // 7. Benchmark Suite Integration
     record('BenchmarkEvaluation: Empirical evaluation runs with Precision >= 0.85', 'Evaluation', () => {
       const benchmark = runBenchmarkEvaluation();
-      if (benchmark.totalSamples < 5) throw new Error('Benchmark suite too small');
+      if (benchmark.totalSamples < 10) throw new Error('Benchmark suite too small');
       if (benchmark.precision < 0.85) throw new Error(`Precision below threshold: ${benchmark.precision}`);
       if (benchmark.recall < 0.80) throw new Error(`Recall below threshold: ${benchmark.recall}`);
     });
@@ -147,7 +178,7 @@ export class TestRunner {
     const failed = tests.length - passed;
 
     return {
-      suiteName: 'CodeSentinel Core Test Suite',
+      suiteName: 'CodeSentinel AST & Security Test Suite',
       passed,
       failed,
       total: tests.length,

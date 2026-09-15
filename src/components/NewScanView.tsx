@@ -321,20 +321,21 @@ def login_handler(username, password):
         {mode === 'GITHUB' && (
           <div className="space-y-2">
             <label className="text-xs font-medium text-slate-300 block">
-              GitHub Repository URL
+              Public GitHub Repository URL
             </label>
             <div className="flex gap-2">
               <input
                 type="text"
                 value={githubUrl}
                 onChange={(e) => setGithubUrl(e.target.value)}
-                placeholder="https://github.com/organization/repository"
+                placeholder="https://github.com/expressjs/express"
                 className="flex-1 px-4 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:border-emerald-500 font-mono"
               />
             </div>
-            <p className="text-[11px] text-slate-500">
-              Files are analyzed statically via sandbox. Code is NEVER executed.
-            </p>
+            <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+              <span>Scans repository recursively via GitHub Git Trees API. Code is never executed. For private repos or rate limits, upload as a ZIP archive.</span>
+            </div>
           </div>
         )}
 

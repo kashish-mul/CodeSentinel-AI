@@ -1,27 +1,15 @@
 # CodeSentinel AI 🛡️
-### *AI-Powered Developer Security & Code Intelligence Platform*
+### *Full-Stack Developer Security, AST Static Analysis & Code Intelligence Platform*
 
-CodeSentinel AI is a developer security and code intelligence web platform that analyzes source code repositories for security vulnerabilities, secrets, dangerous functions, code complexity, and maintainability risks. 
+CodeSentinel AI is an application security (AppSec) and code quality inspection platform. It analyzes source code repositories for security vulnerabilities (CWE/OWASP), dependency risks (SCA), dangerous function usage, code complexity, and maintainability issues.
 
-It pairs static code analysis and AST pattern matching with Google Gemini (`gemini-3.8-flash`) to generate contextual, developer-friendly remediation plans and production-ready patches.
-
----
-
-## 1. Problem & Solution
-
-### Problem
-Developers often struggle to identify subtle vulnerabilities, hard-coded credentials, and architectural complexity early in the development lifecycle. Traditional static analysis tools produce noisy, cryptic warnings with steep learning curves for junior and mid-level engineers.
-
-### Solution
-CodeSentinel AI ingests codebases (via GitHub URL, ZIP archive, or raw snippets), executes a sandboxed static security and quality inspection pipeline, calculates a weighted project health score, and enriches every finding with an AI-generated explanation detailing:
-- **Root Cause:** What is wrong in plain developer terms.
-- **Security Impact:** Why it matters and OWASP / CWE correlation.
-- **Step-by-Step Remediation:** Actionable refactoring guidance.
-- **Before vs. After Diff:** Concrete, production-ready replacement code.
+It combines multi-layered static analysis (TypeScript Compiler API AST, Python AST visitor, and SCA dependency auditing) with Google Gemini (`gemini-2.5-flash`) to generate contextual remediation plans and Before vs. After code patches.
 
 ---
 
-## 2. System Architecture
+## 1. Core Architecture & Analysis Pipeline
+
+CodeSentinel AI avoids surface-level regex scanning by implementing a layered static analysis architecture:
 
 ```text
                                   USER / DEVELOPER
@@ -29,9 +17,9 @@ CodeSentinel AI ingests codebases (via GitHub URL, ZIP archive, or raw snippets)
                                          ▼
                             ┌────────────────────────┐
                             │    React 19 Frontend   │
-                            │  (Dashboard & Findings)│
+                            │  (Dashboard, Diffs, UI)│
                             └────────────┬───────────┘
-                                         │
+                                         │  JWT (Bearer Authorization)
                                      REST API
                                          │
                                          ▼
@@ -42,120 +30,132 @@ CodeSentinel AI ingests codebases (via GitHub URL, ZIP archive, or raw snippets)
                                          │
           ┌──────────────────────────────┼──────────────────────────────┐
           ▼                              ▼                              ▼
-  Repository Ingestion           Analysis Engine               Database / Persistence
-  - Public GitHub clone          - SecurityAnalyzer             - User authentication
-  - Secure ZIP extraction        - QualityAnalyzer              - Scans & history
-  - Sandbox path guards          - ScoringEngine                - Findings & metrics
+  Ingestion Layer                Multi-Layer Engine             Persistence & Auth
+  - Recursive GitHub Tree Walker - JsTsAstAnalyzer (TS AST)     - PostgreSQL (pg.Pool)
+  - JSZip Archive Processor      - PythonAstAnalyzer (AST)      - Disk Fallback (JSON)
+  - Path Traversal Guard         - DependencyScanner (SCA)      - Bcrypt Password Hashing
+                                 - Heuristic Fallback           - HMAC SHA-256 JWTs
                                          │
                                          ▼
                                    Scoring Engine
                         (40% Sec, 30% Qual, 20% Maint, 10% Doc)
                                          │
                                          ▼
-                                Gemini AI Service
-                               (@google/genai SDK)
-                                         │
-                                         ▼
-                               Audit Report Generator
-                                 (Markdown / JSON)
+                                Gemini AI Remediation
+                              (Unified & Side-by-Side Diffs)
 ```
 
+### Analysis Layers:
+1. **TypeScript / JavaScript AST Analyzer (`JsTsAstAnalyzer`):**
+   - Utilizes `typescript.createSourceFile` and recursive node traversal.
+   - Inspects `ts.isCallExpression`, `ts.isBinaryExpression`, and `ts.isPropertyAccessExpression` to identify SQL injection, DOM XSS (`innerHTML`), and arbitrary execution (`eval`).
+   - Ignores safe patterns such as parameterized SQL queries (`$1, ?`) and `textContent` assignments to minimize false positives.
+2. **Python AST Visitor (`PythonAstAnalyzer`):**
+   - Traverses Python constructs (`Call`, `FunctionDef`, `Assign`, `Import`).
+   - Identifies raw SQL query concatenation, dangerous OS execution (`os.system`, `subprocess`), unsafe deserialization (`pickle.loads`), and weak hashing algorithms (`hashlib.md5`).
+3. **Software Composition Analysis (`DependencyScanner`):**
+   - Parses manifest files (`package.json` and `requirements.txt`).
+   - Correlates declared dependency version ranges against known CVE advisories (e.g., `CVE-2021-23337`, `CVE-2020-28168`, `CVE-2022-24999`).
+4. **Heuristic & Secret Fallback:**
+   - Detects exposed cloud credentials, high-entropy tokens, AWS keys (`AKIA...`), and private SSH keys across all text-based source files.
+5. **AI Remediation Service (`AIService`):**
+   - Integrates with Google Gemini via `@google/genai` to generate technical root cause explanations, threat impact assessments, step-by-step remediation plans, and unified git diffs.
+   - Includes a deterministic offline fallback engine ensuring zero downtime when disconnected.
+
 ---
 
-## 3. Technology Stack
+## 2. Ingestion & Repository Scanning
+
+- **Recursive GitHub Tree Walker:** Ingests public repositories via `GET /repos/{owner}/{repo}/git/trees/{branch}?recursive=1`, filtering relevant source files (`.js`, `.ts`, `.py`, `.sql`, `.json`, etc.) without shell cloning.
+- **Truthful Error Handling:** If a repository is private, missing, or rate-limited by GitHub's API, CodeSentinel returns clear HTTP 422 diagnostic errors and prompts the developer to use the ZIP upload workflow, eliminating mock/fake repository fallbacks.
+- **ZIP Archive Processing:** Safely extracts client-uploaded ZIP archives using `JSZip` with validation protecting against directory traversal (`../`) and decompression limits.
+- **Code Snippet Scratchpad:** Allows immediate ad-hoc inspection of code snippets for rapid testing.
+
+---
+
+## 3. Technology Stack & Dependencies
 
 - **Frontend:** React 19, TypeScript, Tailwind CSS, Lucide Icons, Motion.
-- **Backend:** Express, Node.js (v22), tsx, esbuild.
-- **Static Analysis:** Regex & AST-style pattern matching for CWE-89 (SQLi), CWE-798 (Hard-coded secrets), CWE-78 (Command injection), CWE-95 (eval), and CWE-328 (Weak crypto).
-- **AI Engine:** Google Gemini SDK (`@google/genai`) using `gemini-3.8-flash` on the server-side with deterministic rule fallbacks.
-- **Packaging & DevOps:** Multi-stage `Dockerfile`, `docker-compose.yml`, and GitHub Actions CI/CD pipeline (`.github/workflows/ci.yml`).
+- **Backend:** Express, Node.js (v22), `typescript` compiler API, `bcryptjs`, `jsonwebtoken`, `pg`.
+- **Database:** PostgreSQL 16 connection pool with automatic initialization and local JSON storage fallback.
+- **AI Engine:** `@google/genai` SDK targeting `gemini-2.5-flash`.
+- **DevOps:** Multi-stage `Dockerfile`, `docker-compose.yml`, and GitHub Actions CI workflow (`.github/workflows/ci.yml`).
 
 ---
 
-## 4. Key Features
+## 4. Key Security & Quality Checks
 
-1. **Repository Ingestion & Safety Sandbox:**
-   - Ingest public GitHub repositories, upload ZIP archives, or test preset vulnerable/hardened demo repositories.
-   - Built-in guards against path traversal (`..`, absolute paths) and oversized archives (ZIP bomb protection).
-2. **Security Analyzer:**
-   - Hard-coded secrets (AWS keys, private keys, API keys, low-entropy JWT secrets).
-   - SQL Injection (raw string concatenation, f-strings, template literals in SQL queries).
-   - Dynamic evaluation & command execution (`eval`, `exec`, `os.system`, `subprocess`).
-   - Unsafe deserialization (`pickle.loads`, `yaml.load`).
-   - Weak cryptographic algorithms (`MD5`, `SHA-1`, insecure random generators).
-3. **Code Quality & Complexity Analyzer:**
-   - Cyclomatic complexity tracking per function.
-   - Excessive function length warnings (> 40 lines).
-   - Silent exception suppression detection (empty `catch` / `except: pass`).
-   - Documentation ratio (comments to code density).
-4. **Weighted Health Scoring Engine:**
-   - Overall Score = 40% Security + 30% Quality + 20% Maintainability + 10% Documentation.
-5. **Interactive Stage 26 Benchmark Evaluation:**
-   - Empirical evaluation across curated ground-truth vulnerable and safe test samples measuring **Precision**, **Recall**, **F1 Score**, and **Confusion Matrix** (True Positives, False Positives, True Negatives, False Negatives).
-6. **Automated Unit & Regression Testing Suite:**
-   - Live in-app runner executing test assertions across analyzers, scoring formulas, and safety boundaries.
-7. **Downloadable Audit Reports:**
-   - Export audit compliance reports in Markdown or JSON format with print-to-PDF support.
+| Vulnerability / Risk | Standard Mapping | Engine Layer |
+| :--- | :--- | :--- |
+| SQL Injection in raw query concatenation | CWE-89 / OWASP A03:2021 | TypeScript Compiler AST & Python AST |
+| DOM Cross-Site Scripting (XSS via innerHTML) | CWE-79 / OWASP A03:2021 | TypeScript AST Visitor |
+| Hardcoded Cloud Credentials & AWS Keys | CWE-798 / OWASP A07:2021 | Secret Scanner & Heuristics |
+| Arbitrary Code Execution (`eval()`) | CWE-95 / OWASP A03:2021 | TypeScript AST CallExpression |
+| Command Injection (`os.system`, `subprocess`) | CWE-78 / OWASP A03:2021 | Python AST Call Visitor |
+| Known Vulnerable Dependencies (CVE) | CWE-1395 / OWASP A06:2021| Software Composition Analysis (SCA) |
+| Insecure Deserialization (`pickle.loads`) | CWE-502 / OWASP A08:2021 | Python AST Import/Call Visitor |
+| Outdated Cryptographic Hash (MD5, SHA-1) | CWE-328 / OWASP A02:2021 | Cryptographic Rule Engine |
+| Silent Exception Suppression (Empty catch) | Quality / Clean Code | AST Statement Analyzer |
+| High Cyclomatic Complexity & Function Length | Maintainability | Function Metric Engine |
 
 ---
 
-## 5. REST API Documentation
+## 5. REST API Specification
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/api/health` | Service health status and Gemini configuration status |
-| `POST` | `/api/auth/login` | Authenticate developer profile & issue session token |
-| `POST` | `/api/auth/register` | Register new developer account |
-| `GET` | `/api/auth/me` | Fetch active user session |
-| `GET` | `/api/sample-repositories`| Retrieve list of preset test codebases |
-| `GET` | `/api/repositories` | List tracked repositories and aggregate scores |
-| `POST` | `/api/scans/analyze` | Ingest and scan a repository or code snippet |
-| `GET` | `/api/scans` | Retrieve scan history |
-| `GET` | `/api/scans/:id` | Get details and metrics for a specific scan |
-| `GET` | `/api/scans/:id/findings`| Retrieve all findings for a scan |
-| `POST` | `/api/ai/explain` | Generate AI remediation and patch for a finding |
-| `GET` | `/api/evaluation/benchmark`| Execute Stage 26 empirical precision/recall benchmark |
-| `GET` | `/api/tests/run` | Execute the automated regression and unit test suite |
+| `GET` | `/api/health` | Diagnostic status (Postgres connection, Gemini status, AST modules) |
+| `POST` | `/api/auth/login` | Authenticate user credentials using Bcrypt & issue signed JWT |
+| `POST` | `/api/auth/register` | Register new user account with hashed password persistence |
+| `GET` | `/api/auth/me` | Verify and return active user profile from JWT payload |
+| `GET` | `/api/repositories` | List tracked repositories and aggregate scan ratings |
+| `POST` | `/api/scans/analyze` | Ingest and scan repository (GitHub recursive tree, ZIP, or snippet) |
+| `GET` | `/api/scans` | Query scan history and vulnerability severity counts |
+| `GET` | `/api/scans/:id` | Fetch detailed scan breakdown, scores, and findings |
+| `GET` | `/api/scans/:id/findings`| Retrieve granular list of findings with AST node details |
+| `POST` | `/api/ai/explain` | Request Gemini remediation, step-by-step guidance & code diff |
+| `POST` | `/api/copilot/ask` | Interactive Security Copilot conversational Q&A for specific findings |
+| `GET` | `/api/scans/:id/report` | Generate complete executive audit & remediation report |
+| `GET` | `/api/evaluation/benchmark`| Execute 20-sample empirical ground-truth benchmark suite |
+| `GET` | `/api/tests/run` | Execute automated AST, SCA, Crypto, and Scoring test suite |
 
 ---
 
-## 6. Empirical Evaluation Benchmark (Stage 26)
+## 6. Empirical Benchmark Evaluation
 
-CodeSentinel AI includes an empirical test suite of 10 labeled code samples across Python, JavaScript, and TypeScript:
+CodeSentinel includes a 20-sample curated ground-truth evaluation dataset spanning Python, JavaScript, TypeScript, and JSON dependency manifests.
 
-```text
-Evaluation Metrics:
-- Precision: 100%   (TP / (TP + FP))
-- Recall: 100%      (TP / (TP + FN))
-- F1 Score: 1.000
-- Overall Accuracy: 100%
-
-Confusion Matrix:
-- True Positives (TP): 6 (Vulnerabilities correctly detected)
-- True Negatives (TN): 4 (Safe patterns passed without false alarms)
-- False Positives (FP): 0
-- False Negatives (FN): 0
-```
+Samples include both vulnerable patterns and defensive implementations (such as parameterized SQL queries, Argon2id password hashing, DOMPurify sanitization, and whitelist URL validation) to rigorously measure:
+- **Precision:** True Positives / (True Positives + False Positives)
+- **Recall:** True Positives / (True Positives + False Negatives)
+- **F1 Score:** Harmonic mean of precision and recall
+- **Accuracy:** (TP + TN) / (TP + TN + FP + FN)
+- **False Positive Rate (FPR):** FP / (FP + TN)
+- **False Negative Rate (FNR):** FN / (FN + TP)
+- **Category Breakdown:** Granular metrics across Injection, XSS, SSRF, Cryptography, Auth & Secrets, and Path Traversal.
 
 ---
 
-## 7. Running Locally & Containerization
+## 7. Local Setup & Docker Deployment
 
 ### Local Development
 ```bash
 # 1. Install dependencies
 npm install
 
-# 2. Run dev server (Express + Vite)
+# 2. Configure environment (optional Gemini API key & Postgres URL)
+cp .env.example .env
+
+# 3. Start development server (Port 3000)
 npm run dev
 ```
 
 ### Docker Compose
 ```bash
-# Start both application and PostgreSQL
+# Start both CodeSentinel web service and PostgreSQL container
 docker-compose up --build
 ```
-The application will be accessible at `http://localhost:3000`.
+Access the application at `http://localhost:3000`.
 
 ---
 

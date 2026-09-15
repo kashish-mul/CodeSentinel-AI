@@ -2,5 +2,7 @@
   "name": "CodeSentinel AI",
   "description": "AI-Powered Developer Security & Code Intelligence Platform providing static code analysis, vulnerability scanning, code quality metrics, and AI-driven remediation.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
